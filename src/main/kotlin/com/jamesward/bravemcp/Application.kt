@@ -13,6 +13,7 @@ import reactor.core.publisher.Mono
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import org.slf4j.LoggerFactory
 
 @SpringBootApplication
 @EnableConfigurationProperties(BraveProperties::class)
@@ -29,6 +30,8 @@ class Application(
         .baseUrl("https://api.search.brave.com")
         .build()
 
+    private val log = LoggerFactory.getLogger(Application::class.java)
+
     // Simple in-memory cache keyed by the search query
     private val summaryCache = ConcurrentHashMap<String, Mono<String>>()
 
@@ -37,10 +40,14 @@ class Application(
         description = "Performs web searches using the Brave Search API and returns comprehensive search results with rich metadata. When to use: - General web searches for information, facts, or current topics - Location-based queries (restaurants, businesses, points of interest) - News searches for recent events or breaking stories - Finding videos, discussions, or FAQ content - Research requiring diverse result types (web pages, images, reviews, etc.) Returns a JSON list of web results with title, description, and URL."
     )
     fun braveWebSearchSummary(@McpToolParam(required = true, description = "search query (max 400 chars, 50 words") query: String): Mono<String> = run {
+        log.info("Search query: $query")
+
         // Normalize the key a bit to reduce duplicates due to whitespace
-        val key = query.trim()
+        val key = query.trim().lowercase()
 
         summaryCache.computeIfAbsent(key) {
+            log.info("Cache miss for $key")
+
             client
                 .get()
                 .uri {
@@ -55,6 +62,8 @@ class Application(
                 .retrieve()
                 .bodyToMono<BraveSearchResponse>()
                 .flatMap { webSearchResponse ->
+                    log.info("For query $query, getting summary: ${webSearchResponse.summarizer.key}")
+
                     val encodedKey = URLEncoder.encode(webSearchResponse.summarizer.key, StandardCharsets.UTF_8)
 
                     client
@@ -71,7 +80,13 @@ class Application(
                         .bodyToMono<String>()
                 }
                 // Cache the terminal result; remove on error so a future call can retry
-                .doOnError { summaryCache.remove(key) }
+                .doOnError {
+                    log.error("Error while fetching web search results: ${it.message}", it)
+                    summaryCache.remove(key)
+                }
+                .doOnSuccess {
+                    log.info("Successfully fetched summary for: $query")
+                }
                 .cache()
         }
     }
