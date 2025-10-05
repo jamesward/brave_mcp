@@ -41,3 +41,4 @@ out/
 /infra/cdk.out/
 /infra/.venv/
 /infra/__pycache__/
+.DS_Store

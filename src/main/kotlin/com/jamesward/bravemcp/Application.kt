@@ -1,5 +1,6 @@
 package com.jamesward.bravemcp
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.springaicommunity.mcp.annotation.McpTool
 import org.springaicommunity.mcp.annotation.McpToolParam
 import org.springframework.boot.autoconfigure.SpringBootApplication
@@ -10,8 +11,6 @@ import org.springframework.http.MediaType
 import org.springframework.web.reactive.function.client.WebClient
 import org.springframework.web.reactive.function.client.bodyToMono
 import reactor.core.publisher.Mono
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
 import org.slf4j.LoggerFactory
 
@@ -22,18 +21,29 @@ class Application(
     private val braveProperties: BraveProperties
 ) {
 
-    data class Summarizer(val key: String)
+    data class WebResult(
+        val title: String?,
+        val url: String?,
+        val description: String?
+    )
 
-    data class BraveSearchResponse(val summarizer: Summarizer)
+    data class WebSearchResults(
+        val web: WebResults?
+    )
+
+    data class WebResults(
+        val results: List<WebResult>?
+    )
 
     private val client: WebClient = webClientBuilder
         .baseUrl("https://api.search.brave.com")
         .build()
 
     private val log = LoggerFactory.getLogger(Application::class.java)
+    private val objectMapper = ObjectMapper()
 
     // Simple in-memory cache keyed by the search query
-    private val summaryCache = ConcurrentHashMap<String, Mono<String>>()
+    private val searchCache = ConcurrentHashMap<String, Mono<String>>()
 
     @McpTool(
         name = "brave_web_search_summary",
@@ -45,7 +55,7 @@ class Application(
         // Normalize the key a bit to reduce duplicates due to whitespace
         val key = query.trim().lowercase()
 
-        summaryCache.computeIfAbsent(key) {
+        searchCache.computeIfAbsent(key) {
             log.info("Cache miss for $key")
 
             client
@@ -53,39 +63,38 @@ class Application(
                 .uri {
                     it.path("/res/v1/web/search")
                         .queryParam("q", key)
-                        .queryParam("summary", "true")
+                        .queryParam("count", "10")
                         .build()
                 }
                 .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
                 .header(HttpHeaders.ACCEPT_ENCODING, "gzip")
                 .header("X-Subscription-Token", braveProperties.apikey)
                 .retrieve()
-                .bodyToMono<BraveSearchResponse>()
-                .flatMap { webSearchResponse ->
-                    log.info("For query $query, getting summary: ${webSearchResponse.summarizer.key}")
-
-                    val encodedKey = URLEncoder.encode(webSearchResponse.summarizer.key, StandardCharsets.UTF_8)
-
-                    client
-                        .get()
-                        .uri {
-                            it.path("/res/v1/summarizer/search")
-                                .queryParam("key", encodedKey)
-                                .build()
-                        }
-                        .header(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE)
-                        .header(HttpHeaders.ACCEPT_ENCODING, "gzip")
-                        .header("X-Subscription-Token", braveProperties.apikey)
-                        .retrieve()
-                        .bodyToMono<String>()
+                .bodyToMono<WebSearchResults>()
+                .map { response ->
+                    val results = response.web?.results ?: emptyList()
+                    if (results.isEmpty()) {
+                        log.warn("No search results found for query: $query")
+                        "No search results found for this query."
+                    } else {
+                        log.info("Found ${results.size} results for query: $query")
+                        // Format results as JSON string
+                        objectMapper.writeValueAsString(results.take(5).map { result ->
+                            mapOf(
+                                "title" to (result.title ?: ""),
+                                "url" to (result.url ?: ""),
+                                "description" to (result.description ?: "")
+                            )
+                        })
+                    }
                 }
                 // Cache the terminal result; remove on error so a future call can retry
                 .doOnError {
                     log.error("Error while fetching web search results: ${it.message}", it)
-                    summaryCache.remove(key)
+                    searchCache.remove(key)
                 }
                 .doOnSuccess {
-                    log.info("Successfully fetched summary for: $query")
+                    log.info("Successfully fetched search results for: $query")
                 }
                 .cache()
         }
