@@ -55,8 +55,6 @@ class Application(
                 .retrieve()
                 .bodyToMono<BraveSearchResponse>()
                 .flatMap { webSearchResponse ->
-                    println(webSearchResponse.summarizer.key)
-
                     val encodedKey = URLEncoder.encode(webSearchResponse.summarizer.key, StandardCharsets.UTF_8)
 
                     client
